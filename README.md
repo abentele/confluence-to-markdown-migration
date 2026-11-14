@@ -38,9 +38,9 @@ reporting migration issues for review.
 - Omits `livesearch`, `recently-updated`, `favpages`, and `contributors`
   macros from notes while reporting them as unsupported macros. Sections
   made empty by omitting these macros are removed.
-- Flattens layout macros, preserves code and common callout macros including
-  their titles, and marks other dynamic or unsupported macros in the note and
-  warning report.
+- Flattens layout macros without rendering column widths, preserves code and
+  common callout macros including their titles, and marks other dynamic or
+  unsupported macros in the note and warning report.
 
 ## Requirements
 
@@ -75,6 +75,15 @@ python3 converter.py \
   --input-dir confluence-space-exports \
   --output-dir generated-markdown
 ```
+
+For a final vault without `_deleted` pages, their attachments, or CSV reports:
+
+```bash
+python3 converter.py --final
+```
+
+Links to omitted pages cannot be resolved and are rendered as text. Warning
+and link counts are still printed in the CLI summary.
 
 ## Page and draft handling
 

@@ -1579,10 +1579,16 @@ def _replace_macro(
         return
 
     if name in {"section", "column", "layout", "layout-section", "layout-cell"}:
-        for child in macro:
+        for child in list(macro):
             if child.tag == "ac:rich-text-body":
                 child.tag = "div"
                 child.attrib.clear()
+            elif (
+                name == "column"
+                and child.tag == "ac:parameter"
+                and child.get("ac:name") == "width"
+            ):
+                _replace_node(child, html.Element("span"))
         macro.tag = "div"
         macro.attrib.clear()
         return
@@ -1924,7 +1930,9 @@ def _copy_page_assets(
     return copied
 
 
-def convert_exports(input_dir: Path, output_dir: Path) -> MigrationResult:
+def convert_exports(
+    input_dir: Path, output_dir: Path, *, final: bool = False
+) -> MigrationResult:
     input_dir = input_dir.expanduser().resolve()
     raw_output_dir = output_dir.expanduser()
     if raw_output_dir.is_symlink():
@@ -1943,6 +1951,20 @@ def convert_exports(input_dir: Path, output_dir: Path) -> MigrationResult:
     pages, omitted_draft_count, draft_aliases = _omit_unchanged_drafts(
         pages, warnings
     )
+    if final:
+        retained = []
+        for page in pages:
+            if len(page.output_path.parts) > 1 and page.output_path.parts[1] == "_deleted":
+                warnings.remove_page(page)
+            else:
+                retained.append(page)
+        pages = retained
+        retained_ids = {id(page) for page in pages}
+        draft_aliases = {
+            draft_id: page
+            for draft_id, page in draft_aliases.items()
+            if id(page) in retained_ids
+        }
     _deduplicate_page_paths(pages)
     _deduplicate_asset_paths(pages)
     index = _PageIndex(pages, draft_aliases)
@@ -1962,8 +1984,9 @@ def convert_exports(input_dir: Path, output_dir: Path) -> MigrationResult:
         )
         attachment_count += _copy_page_assets(page, output_dir, warnings)
 
-    warnings.write(output_dir)
-    link_report.write(output_dir)
+    if not final:
+        warnings.write(output_dir)
+        link_report.write(output_dir)
     return MigrationResult(
         page_count=len(pages),
         attachment_count=attachment_count,
@@ -1990,9 +2013,14 @@ def main(argv: list[str] | None = None) -> None:
         default=Path("generated-markdown"),
         help="Directory where the Markdown vault and attachments are written.",
     )
+    parser.add_argument(
+        "--final",
+        action="store_true",
+        help="Exclude deleted pages and omit CSV reports from the output.",
+    )
     args = parser.parse_args(argv)
     try:
-        result = convert_exports(args.input_dir, args.output_dir)
+        result = convert_exports(args.input_dir, args.output_dir, final=args.final)
         _run_markdownlint(result.output_dir)
     except (
         OSError,

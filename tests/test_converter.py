@@ -6,8 +6,9 @@ import zipfile
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
-from converter import convert_exports
+from converter import convert_exports, main
 
 
 def make_export(
@@ -632,6 +633,83 @@ class ConverterTests(unittest.TestCase):
                 encoding="utf-8"
             )
             self.assertIn("_deleted/Deleted%20base.md", reference)
+
+    def test_final_excludes_deleted_pages_and_csv_reports(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [
+                    ("1", "Deleted", "deleted", "<p>Same</p>"),
+                    ("2", "Deleted", "draft", "<p>Same</p>"),
+                    ("3", "Trashed", "trashed", "<p>Trash</p>"),
+                    ("4", "Changed", "deleted", "<p>Original</p>"),
+                    ("5", "Changed", "draft", "<p>Changed</p>"),
+                    ("6", "Draft", "draft", "<p>Draft content</p>"),
+                    (
+                        "7",
+                        "Current",
+                        "current",
+                        '<ac:link><ri:page ri:content-id="2" '
+                        'ri:content-title="Deleted"/></ac:link>',
+                    ),
+                ],
+                ("1", "10", "deleted.pdf", b"deleted"),
+                original_versions={"2": "1", "5": "4"},
+            )
+            output = root / "output"
+            convert_exports(input_dir, output)
+            self.assertTrue((output / "DEV/_deleted").is_dir())
+            self.assertTrue((output / "migration-warnings.csv").exists())
+
+            with patch("converter._run_markdownlint") as lint:
+                main(["--input-dir", str(input_dir), "--output-dir", str(output), "--final"])
+
+            lint.assert_called_once_with(output.resolve())
+            self.assertFalse((output / "DEV/_deleted").exists())
+            self.assertFalse(list(output.rglob("*.csv")))
+            self.assertTrue((output / "DEV/_drafts/Draft.md").exists())
+            note = (output / "DEV/Current.md").read_text(encoding="utf-8")
+            self.assertIn("Deleted", note)
+            self.assertNotIn("_deleted", note)
+            self.assertFalse(list(output.rglob("deleted.pdf")))
+
+    def test_column_widths_are_not_rendered_but_content_is_preserved(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [(
+                    "1",
+                    "Columns",
+                    "current",
+                    '<ac:structured-macro ac:name="section"><ac:rich-text-body>'
+                    '<ac:structured-macro ac:name="column">'
+                    '<ac:parameter ac:name="width">60%</ac:parameter>'
+                    '<ac:rich-text-body><p>First column: 60% complete</p>'
+                    "</ac:rich-text-body></ac:structured-macro>"
+                    '<ac:structured-macro ac:name="column">'
+                    '<ac:parameter ac:name="width">40%</ac:parameter>'
+                    "<ac:rich-text-body><p>Second column</p>"
+                    "</ac:rich-text-body></ac:structured-macro>"
+                    "</ac:rich-text-body></ac:structured-macro>",
+                )],
+            )
+
+            result = convert_exports(input_dir, root / "output")
+
+            note = (root / "output/DEV/Columns.md").read_text(encoding="utf-8")
+            self.assertIn("First column: 60% complete", note)
+            self.assertIn("Second column", note)
+            self.assertNotIn("\n60%\n", note)
+            self.assertNotIn("40%", note)
+            self.assertEqual(result.warning_count, 0)
 
     def test_table_whitespace_and_column_layout_do_not_keep_a_draft(self) -> None:
         with TemporaryDirectory() as temporary:
