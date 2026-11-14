@@ -1,0 +1,9 @@
+/confluence-space-exports/
+/generated-markdown/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.DS_Store
+._.DS_Store
