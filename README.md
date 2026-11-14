@@ -28,11 +28,19 @@ reporting migration issues for review.
   to sections on the current page.
 - Converts `children` macros into nested lists of descendant-page links,
   respecting the configured depth.
+- Converts `attachments` macros into lists of links to all available
+  attachments on the current page; macro filters are not applied.
 - Converts `view-file`, `viewpdf`, and `viewppt` macros into links to copied
   attachments. Consecutive macro links are separated by a blank line.
 - Converts `widget` macros into links to their external URL or attachment.
-- Flattens layout macros, preserves code and common callout macros, and marks
-  dynamic or unsupported macros in the note and warning report.
+- Converts Confluence tasks into Markdown checklists, preserving their
+  completion status and task text.
+- Omits `livesearch`, `recently-updated`, `favpages`, and `contributors`
+  macros from notes while reporting them as unsupported macros. Sections
+  made empty by omitting these macros are removed.
+- Flattens layout macros, preserves code and common callout macros including
+  their titles, and marks other dynamic or unsupported macros in the note and
+  warning report.
 
 ## Requirements
 

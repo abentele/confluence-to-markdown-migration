@@ -129,6 +129,63 @@ def make_export(
 
 
 class ConverterTests(unittest.TestCase):
+    def test_attachments_macro_lists_current_page_assets(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [
+                    ("1", "Other", "current", ""),
+                    (
+                        "2",
+                        "Attachments",
+                        "current",
+                        "<p>Before</p>"
+                        '<ac:structured-macro ac:name="attachments">'
+                        '<ac:parameter ac:name="patterns">*.pdf</ac:parameter>'
+                        "</ac:structured-macro><p>After</p>",
+                    ),
+                    (
+                        "3",
+                        "Empty",
+                        "current",
+                        '<ac:structured-macro ac:name="attachments"/>',
+                    ),
+                ],
+                additional_attachments=[
+                    ("1", "10", "shared.pdf", b"other"),
+                    ("1", "11", "other.txt", b"other"),
+                    ("2", "20", "shared.pdf", b"first"),
+                    ("2", "21", "shared.pdf", b"second"),
+                    ("2", "22", "my file.txt", b"text"),
+                    ("2", "23", "missing.txt", b"missing"),
+                ],
+                missing_attachment_ids={"23"},
+            )
+
+            result = convert_exports(input_dir, root / "output")
+
+            output = root / "output/DEV"
+            note = (output / "Attachments.md").read_text(encoding="utf-8")
+            self.assertIn("* [shared.pdf](_attachments/shared--2-20.pdf)", note)
+            self.assertIn("* [shared.pdf](_attachments/shared--2-21.pdf)", note)
+            self.assertIn("* [my file.txt](_attachments/my%20file.txt)", note)
+            self.assertNotIn("other.txt", note)
+            self.assertNotIn("missing.txt", note)
+            self.assertIn("Before", note)
+            self.assertIn("After", note)
+            self.assertEqual((output / "_attachments/shared--2-20.pdf").read_bytes(), b"first")
+            self.assertEqual((output / "_attachments/shared--2-21.pdf").read_bytes(), b"second")
+            self.assertEqual((output / "Empty.md").read_text(encoding="utf-8"), "# Empty\n")
+            self.assertEqual(result.attachment_count, 5)
+            with (root / "output/migration-warnings.csv").open(encoding="utf-8") as file:
+                warnings = list(csv.DictReader(file))
+            self.assertEqual(len(warnings), 1)
+            self.assertIn("missing-attachment-file", str(warnings[0]))
+
     def test_widget_macros_render_external_and_attachment_links(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -645,6 +702,142 @@ class ConverterTests(unittest.TestCase):
                 .exists()
             )
 
+    def test_confluence_tasks_render_as_checklists(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [(
+                    "1",
+                    "Tasks",
+                    "current",
+                    "<ac:task-list>"
+                    "<ac:task><ac:task-id>5</ac:task-id>"
+                    "<ac:task-status>incomplete</ac:task-status>"
+                    "<ac:task-body>\n  <strong>Open</strong> task"
+                    "</ac:task-body></ac:task>"
+                    "<ac:task><ac:task-id>6</ac:task-id>"
+                    "<ac:task-status>complete</ac:task-status>"
+                    "<ac:task-body><p>Done <em>task</em></p></ac:task-body>"
+                    "</ac:task>"
+                    "<ac:task><ac:task-status>unknown</ac:task-status>"
+                    "<ac:task-body>Review</ac:task-body></ac:task>"
+                    "</ac:task-list>",
+                )],
+            )
+
+            result = convert_exports(input_dir, root / "output")
+
+            note = (root / "output/DEV/Tasks.md").read_text(encoding="utf-8")
+            self.assertIn("* [ ] **Open** task", note)
+            self.assertIn("* [x] Done *task*", note)
+            self.assertIn("* [?] Review", note)
+            self.assertNotIn("incomplete", note)
+            self.assertNotIn("\n5\n", note)
+            with (root / "output/migration-warnings.csv").open(
+                encoding="utf-8-sig", newline=""
+            ) as stream:
+                warnings = list(csv.DictReader(stream))
+            self.assertEqual(
+                [(row["warning"], row["detail"]) for row in warnings],
+                [("invalid-task-status", "unknown")],
+            )
+            self.assertEqual(result.warning_count, 1)
+
+    def test_selected_dynamic_macros_are_omitted_but_reported(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            names = ("livesearch", "recently-updated", "favpages", "contributors")
+            macros = "".join(
+                f'<ac:structured-macro ac:name="{name}">'
+                '<ac:parameter ac:name="example">hidden parameter</ac:parameter>'
+                "<ac:rich-text-body><p>hidden body</p></ac:rich-text-body>"
+                "</ac:structured-macro>"
+                for name in names
+            )
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [(
+                    "1",
+                    "Dynamic",
+                    "current",
+                    f"<p>Before {macros} after</p>"
+                    '<ac:structured-macro ac:name="other"/>',
+                )],
+            )
+
+            result = convert_exports(input_dir, root / "output")
+
+            note = (root / "output/DEV/Dynamic.md").read_text(encoding="utf-8")
+            self.assertIn("Before", note)
+            self.assertIn("after", note)
+            self.assertNotIn("hidden", note)
+            for name in names:
+                self.assertNotIn(name, note)
+            self.assertIn("Confluence-Makro: other", note)
+            with (root / "output/migration-warnings.csv").open(
+                encoding="utf-8-sig", newline=""
+            ) as stream:
+                rows = list(csv.DictReader(stream))
+            self.assertEqual(
+                {(row["source_page"], row["warning"], row["detail"]) for row in rows},
+                {
+                    ("DEV/Dynamic.md", "unsupported-macro", name)
+                    for name in (*names, "other")
+                },
+            )
+            self.assertEqual(result.warning_count, 5)
+
+    def test_omitted_macros_remove_only_newly_empty_sections(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [(
+                    "1",
+                    "Sections",
+                    "current",
+                    '<ac:structured-macro ac:name="toc"/>'
+                    "<h1>Remove parent</h1><h2>Remove child</h2>"
+                    '<div><p><ac:structured-macro ac:name="livesearch"/></p></div>'
+                    "<h1>Keep parent</h1><h2>Keep child</h2>"
+                    '<ac:structured-macro ac:name="favpages"/><p>Real content</p>'
+                    "<h1>Keep image</h1>"
+                    '<ac:structured-macro ac:name="contributors"/>'
+                    '<ac:image><ri:attachment ri:filename="image.png"/></ac:image>'
+                    "<h1>Already empty</h1>"
+                    "<h1>Remove inline</h1><p>"
+                    '<ac:structured-macro ac:name="recently-updated"/></p>'
+                    "<h1><ac:structured-macro ac:name=\"favpages\"/></h1>"
+                    "<h1>Last section</h1><p>Visible</p>",
+                )],
+                ("1", "10", "image.png", b"image"),
+            )
+
+            result = convert_exports(input_dir, root / "output")
+
+            note = (root / "output/DEV/Sections.md").read_text(encoding="utf-8")
+            for title in ("Remove parent", "Remove child", "Remove inline"):
+                self.assertNotIn(title, note)
+            for title in (
+                "Keep parent", "Keep child", "Keep image", "Already empty",
+                "Last section",
+            ):
+                self.assertIn(title, note)
+            self.assertIn("[Keep child](#confluence-toc-section-", note)
+            self.assertIn("![image.png](_attachments/image.png)", note)
+            self.assertIn("Real content", note)
+            self.assertEqual(result.warning_count, 4)
+
     def test_code_macro_is_preserved_as_a_fenced_block(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -700,6 +893,38 @@ class ConverterTests(unittest.TestCase):
             )
             self.assertIn("> **Info**", note)
             self.assertIn("> Important **information** here.", note)
+
+    def test_callout_macro_uses_its_title(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            make_export(
+                input_dir / "space.zip",
+                "DEV",
+                [(
+                    "1",
+                    "Callouts",
+                    "current",
+                    '<ac:structured-macro ac:name="tip">'
+                    '<ac:parameter ac:name="title">Welcome to your new space!'
+                    "</ac:parameter>"
+                    "<ac:rich-text-body><p>Tip text</p></ac:rich-text-body>"
+                    "</ac:structured-macro>"
+                    '<ac:structured-macro ac:name="warning">'
+                    '<ac:parameter ac:name="title">   </ac:parameter>'
+                    "<ac:rich-text-body><p>Warning text</p></ac:rich-text-body>"
+                    "</ac:structured-macro>",
+                )],
+            )
+
+            convert_exports(input_dir, root / "output")
+
+            note = (root / "output/DEV/Callouts.md").read_text(encoding="utf-8")
+            self.assertIn("> **Welcome to your new space!**", note)
+            self.assertIn("> Tip text", note)
+            self.assertIn("> **Warning**", note)
+            self.assertIn("> Warning text", note)
 
     def test_same_folder_attachment_names_do_not_overwrite_each_other(self) -> None:
         with TemporaryDirectory() as temporary:

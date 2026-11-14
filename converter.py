@@ -1434,6 +1434,30 @@ def _replace_attachment_macro(
     _replace_node(macro, replacement)
 
 
+def _replace_task(
+    task: html.HtmlElement, page: Page, warnings: WarningLog
+) -> None:
+    status_node = next((child for child in task if child.tag == "ac:task-status"), None)
+    status = status_node.text_content().strip().casefold() if status_node is not None else ""
+    markers = {"complete": "[x]", "incomplete": "[ ]"}
+    marker = markers.get(status)
+    if marker is None:
+        warnings.add(page, "invalid-task-status", status or "(missing)")
+        marker = "[?]"
+
+    body = next((child for child in task if child.tag == "ac:task-body"), None)
+    item = html.Element("li")
+    if body is None:
+        warnings.add(page, "missing-task-body", status or "(missing status)")
+        item.text = f"{marker} [Aufgabeninhalt fehlt]"
+    else:
+        _copy_children(body, item)
+        item.text = f"{marker} {(item.text or '').lstrip()}"
+        if len(item) and item[0].tag == "p" and not item.text[len(marker):].strip():
+            item[0].tag = "span"
+    _replace_node(task, item)
+
+
 def _replace_macro(
     macro: html.HtmlElement,
     page: Page,
@@ -1443,6 +1467,26 @@ def _replace_macro(
 ) -> None:
     name = macro.get("ac:name", "unknown").casefold()
     tail = macro.tail
+
+    if name in {"livesearch", "recently-updated", "favpages", "contributors"}:
+        warnings.add(page, "unsupported-macro", name)
+        replacement = html.Element("span")
+        replacement.set("data-omitted-macro", "true")
+        _replace_node(macro, replacement)
+        return
+
+    if name == "attachments":
+        replacement = html.Element("ul")
+        for assets in page.assets.values():
+            for asset in assets:
+                item = etree.SubElement(replacement, "li")
+                link = etree.SubElement(item, "a")
+                link.set("href", _relative_asset(page, asset, output_dir))
+                link.text = asset.filename
+        if not len(replacement):
+            replacement = html.Element("div")
+        _replace_node(macro, replacement)
+        return
 
     if name in {"view-file", "viewpdf", "viewppt"}:
         _replace_attachment_macro(
@@ -1547,7 +1591,16 @@ def _replace_macro(
         blockquote = html.Element("blockquote")
         heading = etree.SubElement(blockquote, "p")
         strong = etree.SubElement(heading, "strong")
-        strong.text = name.capitalize()
+        title = next(
+            (
+                WHITESPACE.sub(" ", parameter.text_content()).strip()
+                for parameter in macro
+                if parameter.tag == "ac:parameter"
+                and parameter.get("ac:name") == "title"
+            ),
+            "",
+        )
+        strong.text = title or name.capitalize()
         rich_body = next(
             (child for child in macro if child.tag == "ac:rich-text-body"), None
         )
@@ -1618,6 +1671,57 @@ def _rewrite_image(
     _replace_node(element, image)
 
 
+def _remove_empty_macro_sections(root: html.HtmlElement) -> None:
+    headings: list[tuple[html.HtmlElement, int]] = []
+    with_content: set[html.HtmlElement] = set()
+    with_omitted_macro: set[html.HtmlElement] = set()
+
+    def close_heading() -> None:
+        heading, _ = headings.pop()
+        if heading in with_omitted_macro and heading not in with_content:
+            _replace_node(heading, html.Element("span"))
+        elif headings:
+            with_content.add(headings[-1][0])
+
+    def visit(element: html.HtmlElement) -> None:
+        if not isinstance(element.tag, str):
+            return
+        if element.get("data-omitted-macro") == "true":
+            with_omitted_macro.update(heading for heading, _ in headings)
+            return
+        if re.fullmatch(r"h[1-6]", element.tag):
+            level = int(element.tag[1])
+            while headings and headings[-1][1] >= level:
+                close_heading()
+            if (
+                not element.text_content().strip()
+                and element.xpath('.//*[@data-omitted-macro="true"]')
+                and not element.xpath(".//img")
+            ):
+                _replace_node(element, html.Element("span"))
+                with_omitted_macro.update(heading for heading, _ in headings)
+                return
+            headings.append((element, level))
+            return
+        if (
+            (element.text or "").strip()
+            or element.tag in {"img", "hr"}
+            or (
+                element.tag == "ac:structured-macro"
+                and element.get("ac:name", "").casefold() == "toc"
+            )
+        ):
+            with_content.update(heading for heading, _ in headings)
+        for child in element:
+            visit(child)
+            if (child.tail or "").strip():
+                with_content.update(heading for heading, _ in headings)
+
+    visit(root)
+    while headings:
+        close_heading()
+
+
 def _preprocess_body(
     page: Page,
     index: _PageIndex,
@@ -1642,8 +1746,6 @@ def _preprocess_body(
             _replace_children_macro(
                 element, page, index, output_dir, warnings, link_report
             )
-        elif macro_name == "toc":
-            _replace_toc_macro(element, root)
     elements = list(root.iter())
 
     for element in reversed(elements):
@@ -1661,8 +1763,14 @@ def _preprocess_body(
             )
         elif element.tag == "ac:image":
             _rewrite_image(element, page, asset_index, output_dir, warnings)
+        elif element.tag == "ac:task":
+            _replace_task(element, page, warnings)
+        elif element.tag == "ac:task-list":
+            element.tag = "ul"
+            element.attrib.clear()
         elif element.tag == "ac:structured-macro":
-            _replace_macro(element, page, asset_index, output_dir, warnings)
+            if element.get("ac:name", "").casefold() != "toc":
+                _replace_macro(element, page, asset_index, output_dir, warnings)
         elif element.tag == "a":
             _rewrite_anchor(
                 element, page, index, output_dir, warnings, link_report
@@ -1679,6 +1787,13 @@ def _preprocess_body(
             if parent is None or parent.tag != "ac:structured-macro":
                 element.tag = "div"
                 element.attrib.clear()
+    _remove_empty_macro_sections(root)
+    for element in list(root.iter()):
+        if (
+            element.tag == "ac:structured-macro"
+            and element.get("ac:name", "").casefold() == "toc"
+        ):
+            _replace_toc_macro(element, root)
     _separate_consecutive_macro_links(root)
     return root
 
